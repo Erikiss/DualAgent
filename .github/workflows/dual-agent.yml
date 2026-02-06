@@ -33,7 +33,7 @@ jobs:
           path: social-advice
         continue-on-error: true
 
-      - name: Run agent (worker)
+      - name: Run core agent (worker)
         env:
           STEEL_API_KEY: ${{ secrets.STEEL_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -47,7 +47,7 @@ jobs:
           WORKER_TIMEOUT_SEC: "240"
         run: |
           mkdir -p worker-report
-          python agent.py | tee worker-report/run.log
+          python agent_core.py | tee worker-report/run.log
 
       - name: Upload worker artifacts
         uses: actions/upload-artifact@v4
@@ -72,6 +72,21 @@ jobs:
           name: worker-report
           path: worker-report
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install python deps (social)
+        run: |
+          python -m pip install --upgrade pip
+          # social script nutzt nur stdlib, aber lassen wir robust:
+          true
+
+      - name: Create social artifacts (advice + post)
+        run: |
+          python agent_social.py
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -85,22 +100,8 @@ jobs:
 
       - name: Install Moltbook integration (molthub)
         run: |
-          # -y verhindert interaktive Prompts
           npx -y molthub@latest install moltbook
 
-      - name: Create social message from worker output
-        run: |
-          echo "# Worker Summary" > social_post.md
-          echo "" >> social_post.md
-          echo "## Worker report files" >> social_post.md
-          ls -R worker-report >> social_post.md
-          echo "" >> social_post.md
-          echo "## Tail of worker log" >> social_post.md
-          echo '```' >> social_post.md
-          tail -n 200 worker-report/run.log >> social_post.md || true
-          echo '```' >> social_post.md
-
-      # ✅ NEU: Posting-Step
       - name: Post to Moltbook (molthub)
         env:
           POST_TITLE: "Mersenne Worker Update"
@@ -152,21 +153,6 @@ jobs:
           fi
 
           echo "✅ Posted successfully."
-
-      # Rückkanal: advice.md für den nächsten Worker-Run
-      - name: Build advice.md for next run
-        run: |
-          echo "# Advice for next Worker run" > advice.md
-          echo "" >> advice.md
-          echo "## Hard Rules (MANDATORY)" >> advice.md
-          echo "- If you see 'browser not connected'/'websocket closed'/'session corrupted': STOP and EXIT." >> advice.md
-          echo "- Do NOT click the same navigation link repeatedly." >> advice.md
-          echo "- After successful login, prefer extraction over more navigation." >> advice.md
-          echo "" >> advice.md
-          echo "## Context (tail of last worker log)" >> advice.md
-          echo '```' >> advice.md
-          tail -n 120 worker-report/run.log >> advice.md || true
-          echo '```' >> advice.md
 
       - name: Upload social advice artifact
         uses: actions/upload-artifact@v4
