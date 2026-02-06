@@ -9,6 +9,7 @@ jobs:
   worker:
     name: Worker (Mersenne + Steel + Groq)
     runs-on: ubuntu-latest
+    environment: General
     timeout-minutes: 10
 
     steps:
@@ -59,6 +60,7 @@ jobs:
   social:
     name: Social (Moltbook via molthub + Advice)
     runs-on: ubuntu-latest
+    environment: General
     needs: worker
     timeout-minutes: 8
 
@@ -76,12 +78,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install python deps (social)
-        run: |
-          python -m pip install --upgrade pip
-          # social script nutzt nur stdlib, aber lassen wir robust:
-          true
 
       - name: Create social artifacts (advice + post)
         run: |
