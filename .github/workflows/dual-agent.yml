@@ -1,0 +1,185 @@
+name: dual-agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *" # alle 6 Stunden
+
+jobs:
+  worker:
+    name: Worker (Mersenne + Steel + Groq)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install browser-use; fi
+
+      # Advice aus dem letzten Run laden (falls vorhanden)
+      - name: Download social advice (if exists)
+        uses: actions/download-artifact@v4
+        with:
+          name: social-advice
+          path: social-advice
+        continue-on-error: true
+
+      - name: Run agent (worker)
+        env:
+          STEEL_API_KEY: ${{ secrets.STEEL_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+          TARGET_USER: ${{ secrets.TARGET_USER }}
+          TARGET_PW: ${{ secrets.TARGET_PW }}
+          ADVICE_FILE: social-advice/advice.md
+          WORKER_TIMEOUT_SEC: "240"
+        run: |
+          mkdir -p worker-report
+          python agent.py | tee worker-report/run.log
+
+      - name: Upload worker artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-report
+          path: worker-report
+          if-no-files-found: warn
+
+  social:
+    name: Social (Moltbook via molthub + Advice)
+    runs-on: ubuntu-latest
+    needs: worker
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download worker artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: worker-report
+          path: worker-report
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch Moltbook skill.md
+        run: |
+          curl -s https://moltbook.com/skill.md > moltbook_skill.md || true
+          echo "skill.md fetched:"
+          head -n 20 moltbook_skill.md || true
+
+      - name: Install Moltbook integration (molthub)
+        run: |
+          # -y verhindert interaktive Prompts
+          npx -y molthub@latest install moltbook
+
+      - name: Create social message from worker output
+        run: |
+          echo "# Worker Summary" > social_post.md
+          echo "" >> social_post.md
+          echo "## Worker report files" >> social_post.md
+          ls -R worker-report >> social_post.md
+          echo "" >> social_post.md
+          echo "## Tail of worker log" >> social_post.md
+          echo '```' >> social_post.md
+          tail -n 200 worker-report/run.log >> social_post.md || true
+          echo '```' >> social_post.md
+
+      # ✅ NEU: Posting-Step
+      - name: Post to Moltbook (molthub)
+        env:
+          POST_TITLE: "Mersenne Worker Update"
+        run: |
+          set -euo pipefail
+
+          echo "== molthub help =="
+          HELP="$(timeout 30s npx -y molthub@latest --help || true)"
+          echo "$HELP"
+
+          CMD=""
+          if echo "$HELP" | grep -qiE '^\s*post\b'; then
+            CMD="post"
+          elif echo "$HELP" | grep -qiE '^\s*publish\b'; then
+            CMD="publish"
+          elif echo "$HELP" | grep -qiE '^\s*create\b'; then
+            CMD="create"
+          fi
+
+          if [ -z "$CMD" ]; then
+            echo "❌ Konnte keinen Post-Command finden. Bitte poste die Ausgabe von: npx -y molthub@latest --help"
+            exit 2
+          fi
+
+          echo "== Using command: molthub $CMD =="
+
+          set +e
+          timeout 60s npx -y molthub@latest "$CMD" \
+            --title "$POST_TITLE" \
+            --body-file social_post.md
+          RC=$?
+          set -e
+
+          if [ $RC -ne 0 ]; then
+            echo "⚠️ Versuch 1 fehlgeschlagen (rc=$RC). Probier alternative Flags…"
+            set +e
+            timeout 60s npx -y molthub@latest "$CMD" \
+              --title "$POST_TITLE" \
+              --body "$(cat social_post.md)"
+            RC=$?
+            set -e
+          fi
+
+          if [ $RC -ne 0 ]; then
+            echo "❌ Posten hat nicht geklappt (rc=$RC)."
+            echo "Häufige Ursache: Agent ist noch nicht geclaimed / autorisiert."
+            echo "Bitte prüfe die Ausgabe von 'npx -y molthub@latest install moltbook' (Claim-Link)."
+            exit $RC
+          fi
+
+          echo "✅ Posted successfully."
+
+      # Rückkanal: advice.md für den nächsten Worker-Run
+      - name: Build advice.md for next run
+        run: |
+          echo "# Advice for next Worker run" > advice.md
+          echo "" >> advice.md
+          echo "## Hard Rules (MANDATORY)" >> advice.md
+          echo "- If you see 'browser not connected'/'websocket closed'/'session corrupted': STOP and EXIT." >> advice.md
+          echo "- Do NOT click the same navigation link repeatedly." >> advice.md
+          echo "- After successful login, prefer extraction over more navigation." >> advice.md
+          echo "" >> advice.md
+          echo "## Context (tail of last worker log)" >> advice.md
+          echo '```' >> advice.md
+          tail -n 120 worker-report/run.log >> advice.md || true
+          echo '```' >> advice.md
+
+      - name: Upload social advice artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-advice
+          path: advice.md
+          if-no-files-found: warn
+
+      - name: Upload social artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-output
+          path: |
+            moltbook_skill.md
+            social_post.md
+          if-no-files-found: warn
