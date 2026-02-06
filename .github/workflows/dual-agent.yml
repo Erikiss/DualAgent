@@ -24,7 +24,11 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install browser-use; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install browser-use langchain-groq
+          fi
 
       # Advice aus dem letzten Run laden (falls vorhanden)
       - name: Download social advice (if exists)
@@ -57,8 +61,9 @@ jobs:
           path: worker-report
           if-no-files-found: warn
 
+
   social:
-    name: Social (Moltbook via molthub + Advice)
+    name: Social (Moltbook prep + Advice)
     runs-on: ubuntu-latest
     environment: General
     needs: worker
@@ -79,76 +84,24 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install python deps (social)
+        run: |
+          python -m pip install --upgrade pip
+          pip install langchain-groq
+
+      - name: Fetch Moltbook skill.md (follow redirects)
+        run: |
+          curl -fsSL -L https://moltbook.com/skill.md -o moltbook_skill.md
+          echo "skill.md fetched:"
+          head -n 30 moltbook_skill.md || true
+
       - name: Create social artifacts (advice + post)
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          WORKER_LOG: worker-report/run.log
+          SKILL_MD: moltbook_skill.md
         run: |
           python agent_social.py
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Fetch Moltbook skill.md
-        run: |
-          curl -s https://moltbook.com/skill.md > moltbook_skill.md || true
-          echo "skill.md fetched:"
-          head -n 20 moltbook_skill.md || true
-
-      - name: Install Moltbook integration (molthub)
-        run: |
-          npx -y molthub@latest install moltbook
-
-      - name: Post to Moltbook (molthub)
-        env:
-          POST_TITLE: "Mersenne Worker Update"
-        run: |
-          set -euo pipefail
-
-          echo "== molthub help =="
-          HELP="$(timeout 30s npx -y molthub@latest --help || true)"
-          echo "$HELP"
-
-          CMD=""
-          if echo "$HELP" | grep -qiE '^\s*post\b'; then
-            CMD="post"
-          elif echo "$HELP" | grep -qiE '^\s*publish\b'; then
-            CMD="publish"
-          elif echo "$HELP" | grep -qiE '^\s*create\b'; then
-            CMD="create"
-          fi
-
-          if [ -z "$CMD" ]; then
-            echo "❌ Konnte keinen Post-Command finden. Bitte poste die Ausgabe von: npx -y molthub@latest --help"
-            exit 2
-          fi
-
-          echo "== Using command: molthub $CMD =="
-
-          set +e
-          timeout 60s npx -y molthub@latest "$CMD" \
-            --title "$POST_TITLE" \
-            --body-file social_post.md
-          RC=$?
-          set -e
-
-          if [ $RC -ne 0 ]; then
-            echo "⚠️ Versuch 1 fehlgeschlagen (rc=$RC). Probier alternative Flags…"
-            set +e
-            timeout 60s npx -y molthub@latest "$CMD" \
-              --title "$POST_TITLE" \
-              --body "$(cat social_post.md)"
-            RC=$?
-            set -e
-          fi
-
-          if [ $RC -ne 0 ]; then
-            echo "❌ Posten hat nicht geklappt (rc=$RC)."
-            echo "Häufige Ursache: Agent ist noch nicht geclaimed / autorisiert."
-            echo "Bitte prüfe die Ausgabe von 'npx -y molthub@latest install moltbook' (Claim-Link)."
-            exit $RC
-          fi
-
-          echo "✅ Posted successfully."
 
       - name: Upload social advice artifact
         uses: actions/upload-artifact@v4
@@ -164,4 +117,5 @@ jobs:
           path: |
             moltbook_skill.md
             social_post.md
+            advice.md
           if-no-files-found: warn
